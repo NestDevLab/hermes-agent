@@ -1,6 +1,7 @@
 """Fail-closed persistence tests for resolver-produced gateway context."""
 
 from copy import deepcopy
+import json
 from unittest.mock import patch
 
 from gateway.config import GatewayConfig, Platform
@@ -71,9 +72,9 @@ def _group_context() -> dict:
     }
 
 
-def _store(tmp_path) -> SessionStore:
+def _store(tmp_path, config=None) -> SessionStore:
     with patch("gateway.session.SessionStore._ensure_loaded"):
-        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store = SessionStore(sessions_dir=tmp_path, config=config or GatewayConfig())
     store._db = None
     store._loaded = False
     return store
@@ -148,3 +149,47 @@ def test_sender_primary_and_alt_aliases_may_resolve_to_the_same_identity():
     }
 
     assert normalize_agent_memory_context(context, source) is not None
+
+
+def test_shared_session_persists_sender_b_context_when_origin_is_sender_a(tmp_path):
+    config = GatewayConfig(group_sessions_per_user=False)
+    source_a = _group_source("external-a")
+    source_b = _group_source("external-b")
+    store = _store(tmp_path, config)
+    entry_a = store.get_or_create_session(source_a)
+    entry_b = store.get_or_create_session(source_b)
+    assert entry_b is entry_a
+    assert entry_b.origin.user_id == "external-a"
+
+    context_b = _group_context()
+    context_b["person_bindings"] = {"external-b": "person:b"}
+    context_b["allowed_scopes"] = [
+        {"type": "agent", "id": "agent:character"},
+        {"type": "person", "id": "person:b"},
+        {"type": "relationship", "id": "relationship:a:b"},
+        {"type": "room", "id": "room:one"},
+    ]
+    context_b["scope_ids"] = [
+        "agent:character", "person:b", "relationship:a:b", "room:one"
+    ]
+    assert store.bind_agent_memory_context(entry_b.session_key, source_b, context_b)
+
+    serialized = entry_b.to_dict()
+    assert serialized["agent_memory_context"] == context_b
+    restarted = _store(tmp_path, config).get_or_create_session(source_a)
+    assert restarted.agent_memory_context == context_b
+
+
+def test_reload_still_drops_structurally_invalid_context(tmp_path):
+    source = _group_source()
+    store = _store(tmp_path)
+    entry = store.get_or_create_session(source)
+    assert store.bind_agent_memory_context(entry.session_key, source, _group_context())
+
+    sessions_file = tmp_path / "sessions.json"
+    data = json.loads(sessions_file.read_text(encoding="utf8"))
+    data[entry.session_key]["agent_memory_context"]["scope_ids"] = ["room:wrong"]
+    sessions_file.write_text(json.dumps(data), encoding="utf8")
+
+    restarted = _store(tmp_path).get_or_create_session(source)
+    assert restarted.agent_memory_context is None

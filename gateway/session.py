@@ -74,6 +74,8 @@ def _expected_conversation_kind(source: "SessionSource") -> str:
 def normalize_agent_memory_context(
     value: Any,
     source: "SessionSource",
+    *,
+    require_sender_binding: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Validate and canonicalize resolver-produced memory routing context.
 
@@ -121,7 +123,7 @@ def normalize_agent_memory_context(
         for sender_id in sender_ids
         if sender_id in normalized_person_bindings
     }
-    if not sender_ids or len(sender_identity_ids) != 1:
+    if require_sender_binding and (not sender_ids or len(sender_identity_ids) != 1):
         return None
 
     raw_scopes = value.get("allowed_scopes")
@@ -147,9 +149,10 @@ def normalize_agent_memory_context(
         scope["type"] == "room" and scope["id"] == room_scope_id for scope in scopes
     ):
         return None
-    for current_identity in sender_identity_ids:
-        if not any(scope["type"] == "person" and scope["id"] == current_identity for scope in scopes):
-            return None
+    if require_sender_binding:
+        for current_identity in sender_identity_ids:
+            if not any(scope["type"] == "person" and scope["id"] == current_identity for scope in scopes):
+                return None
     relationship_scope_ids = sorted(
         scope["id"] for scope in scopes if scope["type"] == "relationship"
     )
@@ -988,6 +991,7 @@ class SessionEntry:
             context = normalize_agent_memory_context(
                 self.agent_memory_context,
                 self.origin,
+                require_sender_binding=False,
             )
             if context is not None:
                 result["agent_memory_context"] = context
@@ -1064,6 +1068,7 @@ class SessionEntry:
         entry.agent_memory_context = normalize_agent_memory_context(
             data.get("agent_memory_context"),
             origin,
+            require_sender_binding=False,
         ) if origin is not None else None
         return entry
 
