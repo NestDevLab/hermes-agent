@@ -11,6 +11,11 @@ def test_oneshot_stdin_parser_is_mutually_exclusive_with_literal_oneshot():
     args = parser.parse_args(["--oneshot-stdin", "--toolsets", "context_engine"])
     assert args.oneshot_stdin is True
     assert args.oneshot is None
+    assert args.skip_memory is False
+
+    private = parser.parse_args(["--oneshot-stdin", "--skip-memory"])
+    assert private.oneshot_stdin is True
+    assert private.skip_memory is True
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--oneshot-stdin", "-z", "literal"])

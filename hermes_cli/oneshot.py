@@ -190,6 +190,7 @@ def run_oneshot(
     provider: Optional[str] = None,
     toolsets: object = None,
     usage_file: Optional[str] = None,
+    skip_memory: bool = False,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -204,6 +205,8 @@ def run_oneshot(
             cost, token counts, model, api_calls) is written there after the
             run — even when the run fails — so pipelines can account for
             spend per invocation.
+        skip_memory: Disable profile memory, external memory providers, and
+            session recall for this invocation.
 
     Returns the exit code.  Caller should sys.exit() with the return.
     """
@@ -256,6 +259,7 @@ def run_oneshot(
                     provider=provider,
                     toolsets=explicit_toolsets,
                     use_config_toolsets=use_config_toolsets,
+                    skip_memory=skip_memory,
                 )
             except BaseException as exc:  # noqa: BLE001
                 # Capture anything that escapes the agent (including OSError
@@ -324,6 +328,7 @@ def _run_agent(
     provider: Optional[str] = None,
     toolsets: object = None,
     use_config_toolsets: bool = True,
+    skip_memory: bool = False,
 ) -> tuple[str, dict]:
     """Build an AIAgent exactly like a normal CLI chat turn would, then
     run a single conversation.  Returns ``(final_response, run_result)``."""
@@ -403,7 +408,7 @@ def _run_agent(
     if toolsets_list is None and use_config_toolsets:
         toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
 
-    session_db = _create_session_db_for_oneshot()
+    session_db = None if skip_memory else _create_session_db_for_oneshot()
     # Read the effective fallback chain from profile config so oneshot workers
     # honour the same merge semantics as interactive CLI and gateway sessions.
     _fb = get_fallback_chain(cfg)
@@ -420,6 +425,7 @@ def _run_agent(
         session_db=session_db,
         credential_pool=runtime.get("credential_pool"),
         fallback_model=_fb or None,
+        skip_memory=skip_memory,
         # Interactive callbacks are intentionally NOT wired beyond this
         # one.  In oneshot mode there's no user sitting at a terminal:
         #   - clarify  → returns a synthetic "pick a default" instruction

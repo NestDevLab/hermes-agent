@@ -113,6 +113,14 @@ def build_top_level_parser():
             "auto-bypassed. Intended for scripts / pipes."
         ),
     )
+    parser.add_argument(
+        "--skip-memory",
+        action="store_true",
+        help=(
+            "One-shot mode only: disable profile memory files, memory providers, "
+            "and session recall for this invocation."
+        ),
+    )
     oneshot_input.add_argument(
         "--oneshot-stdin",
         action="store_true",

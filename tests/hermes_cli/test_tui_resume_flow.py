@@ -380,6 +380,7 @@ def test_termux_fast_cli_launch_oneshot_uses_light_parser(monkeypatch, main_mod)
         "provider": "openai",
         "toolsets": None,
         "usage_file": None,
+        "skip_memory": False,
     }
 
 
@@ -619,6 +620,7 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
         "provider": None,
         "toolsets": "web,terminal",
         "usage_file": None,
+        "skip_memory": False,
     }
 
 
@@ -667,6 +669,7 @@ def test_main_top_level_oneshot_stdin_keeps_prompt_out_of_argv(monkeypatch, main
     assert captured["prompt"] == secret_prompt
     assert secret_prompt not in "\0".join(sys.argv)
     assert captured["toolsets"] == "context_engine"
+    assert captured["skip_memory"] is False
 
 
 def _stub_plugin_discovery(monkeypatch):
@@ -931,6 +934,73 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["session_db"] is sentinel_db
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
+
+
+def test_oneshot_skip_memory_disables_profile_and_session_recall(monkeypatch):
+    """--skip-memory reaches AIAgent and does not construct a SessionDB."""
+    from hermes_cli.oneshot import _run_agent
+
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.suppress_status_output = False
+            self.stream_delta_callback = object()
+            self.tool_gen_callback = object()
+
+        def run_conversation(self, prompt, **_kwargs):
+            captured["prompt"] = prompt
+            return {"final_response": "ok", "failed": False, "partial": False}
+
+    class ForbiddenSessionDB:
+        def __new__(cls):
+            raise AssertionError("SessionDB must not be constructed")
+
+    def mod(name, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        return module
+
+    monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
+    monkeypatch.setitem(sys.modules, "hermes_state", mod("hermes_state", SessionDB=ForbiddenSessionDB))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        mod("hermes_cli.config", load_config=lambda: {"model": {"default": "m"}}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.models",
+        mod("hermes_cli.models", detect_provider_for_model=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        mod(
+            "hermes_cli.runtime_provider",
+            resolve_runtime_provider=lambda **_kwargs: {
+                "api_key": "k",
+                "base_url": "u",
+                "provider": "p",
+                "api_mode": "chat_completions",
+                "credential_pool": None,
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.tools_config",
+        mod("hermes_cli.tools_config", _get_platform_tools=lambda *_args, **_kwargs: {"session_search"}),
+    )
+
+    text, result = _run_agent("bounded context only", skip_memory=True)
+    assert text == "ok"
+    assert not result.get("failed")
+    assert captured["skip_memory"] is True
+    assert captured["session_db"] is None
+    assert captured["prompt"] == "bounded context only"
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
