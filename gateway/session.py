@@ -116,7 +116,12 @@ def normalize_agent_memory_context(
         for item in (source.user_id, source.user_id_alt)
         if str(item or "").strip()
     }
-    if not sender_ids or not any(sender_id in normalized_person_bindings for sender_id in sender_ids):
+    sender_identity_ids = {
+        normalized_person_bindings[sender_id]
+        for sender_id in sender_ids
+        if sender_id in normalized_person_bindings
+    }
+    if not sender_ids or len(sender_identity_ids) != 1:
         return None
 
     raw_scopes = value.get("allowed_scopes")
@@ -142,8 +147,8 @@ def normalize_agent_memory_context(
         scope["type"] == "room" and scope["id"] == room_scope_id for scope in scopes
     ):
         return None
-    for participant in participants:
-        if not any(scope["type"] == "person" and scope["id"] == participant for scope in scopes):
+    for current_identity in sender_identity_ids:
+        if not any(scope["type"] == "person" and scope["id"] == current_identity for scope in scopes):
             return None
     relationship_scope_ids = sorted(
         scope["id"] for scope in scopes if scope["type"] == "relationship"

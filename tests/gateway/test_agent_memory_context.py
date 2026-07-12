@@ -38,14 +38,12 @@ def _group_context() -> dict:
         "allowed_scopes": [
             {"type": "agent", "id": "agent:character"},
             {"type": "person", "id": "person:a"},
-            {"type": "person", "id": "person:b"},
             {"type": "relationship", "id": "relationship:a:b"},
             {"type": "room", "id": "room:one"},
         ],
         "scope_ids": [
             "agent:character",
             "person:a",
-            "person:b",
             "relationship:a:b",
             "room:one",
         ],
@@ -137,3 +135,16 @@ def test_group_context_requires_structured_output_policy():
     context["output_policy"] = None
 
     assert normalize_agent_memory_context(context, source) is None
+
+
+def test_sender_primary_and_alt_aliases_may_resolve_to_the_same_identity():
+    source = _group_source()
+    source.user_id_alt = "external-a-alt"
+    context = _group_context()
+    context["person_bindings"] = {
+        "external-a": "person:a",
+        "external-a-alt": "person:a",
+        "external-b": "person:b",
+    }
+
+    assert normalize_agent_memory_context(context, source) is not None
