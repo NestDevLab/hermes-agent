@@ -147,3 +147,10 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# syncwheel managed metadata
+.syncwheel/ledger/
+.syncwheel/profile.local.json
+.syncwheel/manifests/*.local.json
+.syncwheel/wt/
+# end syncwheel managed metadata
