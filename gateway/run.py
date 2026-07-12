@@ -10064,9 +10064,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
-                    if asyncio.iscoroutine(result):
-                        result = await result
+                    # Plugin commands run before normal agent dispatch, so the
+                    # turn's SessionContext has not been bound yet. Bind the
+                    # verified gateway source around the handler so scoped
+                    # commands resolve the current channel/thread instead of a
+                    # process-global fallback. Reuse the normal binder to keep
+                    # ContextVar and async-delivery semantics aligned.
+                    plugin_context = SessionContext(
+                        source=source,
+                        connected_platforms=[],
+                        home_channels={},
+                        session_key=_quick_key or "",
+                    )
+                    plugin_session_tokens = self._set_session_env(plugin_context)
+                    try:
+                        result = plugin_handler(user_args)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                    finally:
+                        self._clear_session_env(plugin_session_tokens)
                     return str(result) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
