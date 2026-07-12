@@ -622,6 +622,53 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
     }
 
 
+def test_main_top_level_oneshot_stdin_keeps_prompt_out_of_argv(monkeypatch, main_mod):
+    captured = {}
+    secret_prompt = "sensitive prompt that must stay on stdin"
+
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        sys, "argv", ["hermes", "--oneshot-stdin", "--toolsets", "context_engine"]
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.plugins",
+        types.SimpleNamespace(discover_plugins=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.mcp_tool",
+        types.SimpleNamespace(discover_mcp_tools=lambda: None),
+    )
+    monkeypatch.setattr(config_mod, "load_config", lambda: {})
+    monkeypatch.setattr(config_mod, "get_container_exec_info", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.shell_hooks",
+        types.SimpleNamespace(register_from_config=lambda _cfg, accept_hooks=False: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.oneshot",
+        types.SimpleNamespace(
+            read_oneshot_stdin=lambda: secret_prompt,
+            run_oneshot=lambda prompt, **kwargs: captured.update(
+                {"prompt": prompt, **kwargs}
+            )
+            or 0,
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod.main()
+
+    assert exc.value.code == 0
+    assert captured["prompt"] == secret_prompt
+    assert secret_prompt not in "\0".join(sys.argv)
+    assert captured["toolsets"] == "context_engine"
+
+
 def _stub_plugin_discovery(monkeypatch):
     monkeypatch.setitem(
         sys.modules,

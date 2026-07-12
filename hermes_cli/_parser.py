@@ -99,7 +99,8 @@ def build_top_level_parser():
     parser.add_argument(
         "--version", "-V", action="store_true", help="Show version and exit"
     )
-    parser.add_argument(
+    oneshot_input = parser.add_mutually_exclusive_group()
+    oneshot_input.add_argument(
         "-z",
         "--oneshot",
         metavar="PROMPT",
@@ -110,6 +111,14 @@ def build_top_level_parser():
             "previews, no session_id line. Tools, memory, rules, and "
             "AGENTS.md in the CWD are loaded as normal; approvals are "
             "auto-bypassed. Intended for scripts / pipes."
+        ),
+    )
+    oneshot_input.add_argument(
+        "--oneshot-stdin",
+        action="store_true",
+        help=(
+            "One-shot mode with the prompt read from stdin instead of argv. "
+            "This keeps sensitive prompts out of process listings and shell audit logs."
         ),
     )
     parser.add_argument(

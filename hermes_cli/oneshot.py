@@ -31,6 +31,30 @@ from typing import Optional
 from hermes_cli.fallback_config import get_fallback_chain
 
 
+_ONESHOT_STDIN_LIMIT_BYTES = 1024 * 1024
+
+
+def read_oneshot_stdin(stream=None, limit_bytes: int = _ONESHOT_STDIN_LIMIT_BYTES) -> str:
+    """Read a bounded one-shot prompt from stdin without reflecting its contents."""
+    source = stream or sys.stdin
+    chunks: list[str] = []
+    total = 0
+    while True:
+        chunk = source.read(64 * 1024)
+        if not chunk:
+            break
+        if not isinstance(chunk, str):
+            chunk = chunk.decode("utf-8", errors="strict")
+        total += len(chunk.encode("utf-8"))
+        if total > limit_bytes:
+            raise ValueError("one-shot stdin exceeds the input limit")
+        chunks.append(chunk)
+    prompt = "".join(chunks)
+    if not prompt:
+        raise ValueError("one-shot stdin is empty")
+    return prompt
+
+
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
     if not toolsets:
         return None
