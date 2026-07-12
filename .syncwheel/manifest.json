@@ -10,9 +10,24 @@
     "branch": "main-integration",
     "base": "origin/main",
     "strategy": "cherry-pick",
-    "stacks": []
+    "stacks": [
+      "amf-oneshot-stdin"
+    ]
   },
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "amf-oneshot-stdin",
+      "branch": "fix/oneshot-stdin",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "57b8aad12b0f0eb1d31b9e466c300d9234ab58c2"
+      ],
+      "meta": {}
+    }
+  ],
   "syncwheel_worktree_root": ".syncwheel/wt",
   "syncwheel_tracking": "git-tracked"
 }
