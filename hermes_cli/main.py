@@ -12556,7 +12556,7 @@ def _try_termux_fast_cli_launch() -> bool:
 
     first = _first_positional_argv()
     has_oneshot = any(
-        arg == "-z" or arg == "--oneshot" or arg.startswith("--oneshot=")
+        arg in {"-z", "--oneshot", "--oneshot-stdin"} or arg.startswith("--oneshot=")
         for arg in argv
     )
     if not has_oneshot and first not in {None, "chat"}:
@@ -12572,17 +12572,29 @@ def _try_termux_fast_cli_launch() -> bool:
         _print_version_info(check_updates=False)
         return True
 
-    if getattr(args, "oneshot", None):
-        _prepare_agent_startup(args)
+    if getattr(args, "oneshot", None) is not None or getattr(args, "oneshot_stdin", False):
         from hermes_cli.oneshot import run_oneshot
+
+        try:
+            if getattr(args, "oneshot_stdin", False):
+                from hermes_cli.oneshot import read_oneshot_stdin
+
+                prompt = read_oneshot_stdin()
+            else:
+                prompt = args.oneshot
+        except (OSError, UnicodeError, ValueError):
+            sys.stderr.write("hermes --oneshot-stdin: unable to read a valid prompt\n")
+            sys.exit(2)
+        _prepare_agent_startup(args)
 
         sys.exit(
             run_oneshot(
-                args.oneshot,
+                prompt,
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
                 usage_file=getattr(args, "usage_file", None),
+                skip_memory=getattr(args, "skip_memory", False),
             )
         )
 
@@ -12638,7 +12650,9 @@ def _try_termux_fast_tui_launch() -> bool:
     args = parser.parse_args(_coalesce_session_name_args(sys.argv[1:]))
 
     # Preserve top-level behaviours whose semantics are not "launch chat/TUI".
-    if getattr(args, "version", False) or getattr(args, "oneshot", None):
+    if (getattr(args, "version", False)
+            or getattr(args, "oneshot", None) is not None
+            or getattr(args, "oneshot_stdin", False)):
         return False
     if getattr(args, "command", None) not in {None, "chat"}:
         return False
@@ -14721,6 +14735,19 @@ def main():
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
 
+    oneshot_prompt = None
+    if getattr(args, "oneshot", None) is not None or getattr(args, "oneshot_stdin", False):
+        try:
+            if getattr(args, "oneshot_stdin", False):
+                from hermes_cli.oneshot import read_oneshot_stdin
+
+                oneshot_prompt = read_oneshot_stdin()
+            else:
+                oneshot_prompt = args.oneshot
+        except (OSError, UnicodeError, ValueError):
+            sys.stderr.write("hermes --oneshot-stdin: unable to read a valid prompt\n")
+            sys.exit(2)
+
     # Discover Python plugins and register shell hooks once, before any
     # command that can fire lifecycle hooks.  Both are idempotent; gated
     # so introspection/management commands (hermes hooks list, cron
@@ -14730,16 +14757,17 @@ def main():
 
     # Handle top-level --oneshot / -z: single-shot mode, stdout = final
     # response only, nothing else. Bypasses cli.py entirely.
-    if getattr(args, "oneshot", None):
+    if getattr(args, "oneshot", None) is not None or getattr(args, "oneshot_stdin", False):
         from hermes_cli.oneshot import run_oneshot
 
         sys.exit(
             run_oneshot(
-                args.oneshot,
+                oneshot_prompt,
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
                 usage_file=getattr(args, "usage_file", None),
+                skip_memory=getattr(args, "skip_memory", False),
             )
         )
 

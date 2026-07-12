@@ -31,6 +31,30 @@ from typing import Optional
 from hermes_cli.fallback_config import get_fallback_chain
 
 
+_ONESHOT_STDIN_LIMIT_BYTES = 1024 * 1024
+
+
+def read_oneshot_stdin(stream=None, limit_bytes: int = _ONESHOT_STDIN_LIMIT_BYTES) -> str:
+    """Read a bounded one-shot prompt from stdin without reflecting its contents."""
+    source = stream or sys.stdin
+    chunks: list[str] = []
+    total = 0
+    while True:
+        chunk = source.read(64 * 1024)
+        if not chunk:
+            break
+        if not isinstance(chunk, str):
+            chunk = chunk.decode("utf-8", errors="strict")
+        total += len(chunk.encode("utf-8"))
+        if total > limit_bytes:
+            raise ValueError("one-shot stdin exceeds the input limit")
+        chunks.append(chunk)
+    prompt = "".join(chunks)
+    if not prompt:
+        raise ValueError("one-shot stdin is empty")
+    return prompt
+
+
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
     if not toolsets:
         return None
@@ -166,6 +190,7 @@ def run_oneshot(
     provider: Optional[str] = None,
     toolsets: object = None,
     usage_file: Optional[str] = None,
+    skip_memory: bool = False,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -180,6 +205,8 @@ def run_oneshot(
             cost, token counts, model, api_calls) is written there after the
             run — even when the run fails — so pipelines can account for
             spend per invocation.
+        skip_memory: Disable profile memory, external memory providers, and
+            session recall for this invocation.
 
     Returns the exit code.  Caller should sys.exit() with the return.
     """
@@ -232,6 +259,7 @@ def run_oneshot(
                     provider=provider,
                     toolsets=explicit_toolsets,
                     use_config_toolsets=use_config_toolsets,
+                    skip_memory=skip_memory,
                 )
             except BaseException as exc:  # noqa: BLE001
                 # Capture anything that escapes the agent (including OSError
@@ -300,6 +328,7 @@ def _run_agent(
     provider: Optional[str] = None,
     toolsets: object = None,
     use_config_toolsets: bool = True,
+    skip_memory: bool = False,
 ) -> tuple[str, dict]:
     """Build an AIAgent exactly like a normal CLI chat turn would, then
     run a single conversation.  Returns ``(final_response, run_result)``."""
@@ -379,7 +408,7 @@ def _run_agent(
     if toolsets_list is None and use_config_toolsets:
         toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
 
-    session_db = _create_session_db_for_oneshot()
+    session_db = None if skip_memory else _create_session_db_for_oneshot()
     # Read the effective fallback chain from profile config so oneshot workers
     # honour the same merge semantics as interactive CLI and gateway sessions.
     _fb = get_fallback_chain(cfg)
@@ -396,6 +425,7 @@ def _run_agent(
         session_db=session_db,
         credential_pool=runtime.get("credential_pool"),
         fallback_model=_fb or None,
+        skip_memory=skip_memory,
         # Interactive callbacks are intentionally NOT wired beyond this
         # one.  In oneshot mode there's no user sitting at a terminal:
         #   - clarify  → returns a synthetic "pick a default" instruction
@@ -409,6 +439,15 @@ def _run_agent(
         #   - skill secret capture → returns gracefully when no callback set
         clarify_callback=_oneshot_clarify_callback,
     )
+
+    # ``--skip-memory`` is a hard isolation boundary for this disposable
+    # worker.  In addition to suppressing MEMORY.md, USER.md, and providers in
+    # AIAgent init, disable persistence before any tool or conversation code
+    # can lazily open the canonical SessionDB.
+    if skip_memory:
+        agent._skip_memory = True
+        agent._persist_disabled = True
+        agent._session_db = None
 
     # Belt-and-braces: make sure AIAgent doesn't invoke any streaming
     # display callbacks that would bypass our stdout capture.

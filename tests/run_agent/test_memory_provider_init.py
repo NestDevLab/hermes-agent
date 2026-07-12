@@ -94,6 +94,51 @@ def test_aiagent_forwards_user_id_alt_to_memory_provider():
     assert "status_callback" not in provider.init_kwargs
 
 
+def test_skip_memory_is_a_persistent_barrier_for_all_memory_layers():
+    """Lazy recall cannot undo MEMORY/USER/provider isolation."""
+    cfg = {
+        "memory": {
+            "memory_enabled": True,
+            "user_profile_enabled": True,
+            "provider": "recording",
+        },
+        "agent": {},
+    }
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("plugins.memory.load_memory_provider") as load_memory_provider,
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+        patch("tools.memory_tool.MemoryStore") as memory_store,
+        patch("hermes_state.SessionDB") as session_db,
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            session_db=None,
+        )
+        recalled = agent._get_session_db_for_recall()
+
+    assert agent._skip_memory is True
+    assert agent._memory_enabled is False
+    assert agent._user_profile_enabled is False
+    assert agent._memory_store is None
+    assert agent._memory_manager is None
+    assert agent._session_db is None
+    assert recalled is None
+    memory_store.assert_not_called()
+    load_memory_provider.assert_not_called()
+    session_db.assert_not_called()
+
+
 class CoreShadowProvider:
     """Provider that tries to register tools shadowing built-in core tools."""
 
