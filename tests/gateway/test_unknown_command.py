@@ -5,6 +5,7 @@ text, which often leads to silent failure (e.g. the model inventing a bogus
 delegate_task call instead of telling the user the command doesn't exist).
 """
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -371,3 +372,69 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_command_binds_current_channel_and_thread_context(monkeypatch):
+    """Scoped plugin commands must see the same ContextVars as agent dispatch."""
+    import gateway.run as gateway_run
+    from gateway.run import GatewayRunner
+    from gateway.session_context import get_session_env
+    from hermes_cli import plugins as plugins_mod
+
+    source = _make_source()
+    source.chat_id = "channel-1"
+    source.chat_name = "untrusted channel label"
+    source.chat_type = "group"
+    source.thread_id = "9001"
+    source.message_id = "source-message-1"
+    source.profile = "vitae"
+    event = MessageEvent(text="/policy show", source=source, message_id="event-message-1")
+    runner = _make_runner()
+    runner._set_session_env = GatewayRunner._set_session_env.__get__(runner)
+    runner._clear_session_env = GatewayRunner._clear_session_env.__get__(runner)
+    observed = {}
+
+    async def policy_handler(args):
+        await asyncio.sleep(0)
+        observed.update({
+            "args": args,
+            "platform": get_session_env("HERMES_SESSION_PLATFORM"),
+            "chat_id": get_session_env("HERMES_SESSION_CHAT_ID"),
+            "thread_id": get_session_env("HERMES_SESSION_THREAD_ID"),
+            "user_id": get_session_env("HERMES_SESSION_USER_ID"),
+            "session_key": get_session_env("HERMES_SESSION_KEY"),
+            "message_id": get_session_env("HERMES_SESSION_MESSAGE_ID"),
+            "profile": get_session_env("HERMES_SESSION_PROFILE"),
+        })
+        return "scoped policy"
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_commands",
+        lambda: {"policy": {"description": "Scoped policy", "args_hint": "show"}},
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: policy_handler if name == "policy" else None,
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "scoped policy"
+    assert observed == {
+        "args": "show",
+        "platform": "telegram",
+        "chat_id": "channel-1",
+        "thread_id": "9001",
+        "user_id": "u1",
+        "session_key": "agent:main:telegram:group:channel-1:9001",
+        "message_id": "source-message-1",
+        "profile": "vitae",
+    }
+    assert get_session_env("HERMES_SESSION_CHAT_ID") == ""
+    assert get_session_env("HERMES_SESSION_THREAD_ID") == ""
