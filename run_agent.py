@@ -576,7 +576,7 @@ class AIAgent:
         # canonical state DB: doing so would re-arm _flush_messages_to_session_db
         # to write the fork's harness turn into the user's real session. Recall
         # degrades to None for them (they don't use session_search anyway).
-        if getattr(self, "_persist_disabled", False):
+        if getattr(self, "_skip_memory", False) or getattr(self, "_persist_disabled", False):
             return None
         if self._session_db is not None:
             return self._session_db

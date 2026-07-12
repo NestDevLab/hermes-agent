@@ -945,12 +945,18 @@ def test_oneshot_skip_memory_disables_profile_and_session_recall(monkeypatch):
     class FakeAgent:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+            self._skip_memory = bool(kwargs.get("skip_memory"))
+            self._persist_disabled = False
+            self._session_db = kwargs.get("session_db")
             self.suppress_status_output = False
             self.stream_delta_callback = object()
             self.tool_gen_callback = object()
 
         def run_conversation(self, prompt, **_kwargs):
             captured["prompt"] = prompt
+            captured["agent_skip_memory"] = self._skip_memory
+            captured["persist_disabled"] = self._persist_disabled
+            captured["agent_session_db"] = self._session_db
             return {"final_response": "ok", "failed": False, "partial": False}
 
     class ForbiddenSessionDB:
@@ -1000,6 +1006,9 @@ def test_oneshot_skip_memory_disables_profile_and_session_recall(monkeypatch):
     assert not result.get("failed")
     assert captured["skip_memory"] is True
     assert captured["session_db"] is None
+    assert captured["agent_skip_memory"] is True
+    assert captured["persist_disabled"] is True
+    assert captured["agent_session_db"] is None
     assert captured["prompt"] == "bounded context only"
 
 

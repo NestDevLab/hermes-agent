@@ -1297,6 +1297,11 @@ def init_agent(
     agent._parent_session_id = parent_session_id
     agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
     agent._session_db_created = False  # DB row deferred to run_conversation()
+    # Keep the constructor-level memory isolation decision on the agent.  This
+    # is consulted by lazy recall as well as the eager MEMORY/USER/provider
+    # loaders below, so a caller cannot accidentally re-enable session recall
+    # later merely because it passed no SessionDB at construction time.
+    agent._skip_memory = bool(skip_memory)
     # Most agents own their session row and should finalize it on close().
     # Some temporary helper agents (manual compression / session-hygiene /
     # background-review forks) rotate or share the session forward to a

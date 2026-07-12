@@ -440,6 +440,15 @@ def _run_agent(
         clarify_callback=_oneshot_clarify_callback,
     )
 
+    # ``--skip-memory`` is a hard isolation boundary for this disposable
+    # worker.  In addition to suppressing MEMORY.md, USER.md, and providers in
+    # AIAgent init, disable persistence before any tool or conversation code
+    # can lazily open the canonical SessionDB.
+    if skip_memory:
+        agent._skip_memory = True
+        agent._persist_disabled = True
+        agent._session_db = None
+
     # Belt-and-braces: make sure AIAgent doesn't invoke any streaming
     # display callbacks that would bypass our stdout capture.
     agent.suppress_status_output = True
