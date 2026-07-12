@@ -171,6 +171,14 @@ VALID_HOOKS: Set[str] = {
     #   {"action": "allow"}  /  None             -> normal dispatch
     # Kwargs: event: MessageEvent, gateway: GatewayRunner, session_store.
     "pre_gateway_dispatch",
+    # Trusted gateway routing-context resolver. Fired after authorization and
+    # final route normalization, immediately after the SessionEntry exists.
+    # Exactly one plugin may return:
+    #   {"agent_memory_context": { ... amf-conversation-context/v1 ... }}
+    # Missing, multiple, malformed, or route-inconsistent results fail closed:
+    # the gateway clears the session's previously persisted trusted context.
+    # Kwargs: event, source: SessionSource, gateway, session_entry.
+    "resolve_gateway_routing_context",
     # Approval lifecycle hooks. Fired by tools/approval.py when a dangerous
     # command needs user approval -- fires BOTH for CLI-interactive prompts
     # and for gateway/ACP approvals (Telegram, Discord, Slack, TUI, etc.).

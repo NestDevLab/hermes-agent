@@ -10770,6 +10770,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
         return source
 
+    def _resolve_gateway_routing_context(self, *, event, source, session_entry):
+        """Collect the single explicit trusted routing-context resolution.
+
+        The gateway intentionally does not infer canonical identities or
+        disclosure policy from platform metadata.  Zero or multiple resolver
+        answers return ``None`` so SessionStore clears stale trusted context.
+        """
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+            results = _invoke_hook(
+                "resolve_gateway_routing_context",
+                event=event,
+                source=source,
+                gateway=self,
+                session_entry=session_entry,
+            )
+        except Exception as exc:
+            logger.warning("Gateway routing-context resolver failed: %s", exc)
+            return None
+
+        candidates = [
+            result["agent_memory_context"]
+            for result in results
+            if isinstance(result, dict)
+            and set(result) == {"agent_memory_context"}
+            and isinstance(result.get("agent_memory_context"), dict)
+        ]
+        if len(candidates) != 1:
+            if candidates or results:
+                logger.warning(
+                    "Gateway routing-context resolution was ambiguous or malformed "
+                    "(%d hook results, %d valid candidates)",
+                    len(results),
+                    len(candidates),
+                )
+            return None
+        return candidates[0]
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -10800,6 +10839,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
 
         session_entry = await self.async_session_store.get_or_create_session(source)
+        if not bool(getattr(event, "internal", False)):
+            memory_context = self._resolve_gateway_routing_context(
+                event=event,
+                source=source,
+                session_entry=session_entry,
+            )
+            trusted = await self.async_session_store.bind_agent_memory_context(
+                session_entry.session_key,
+                source,
+                memory_context,
+            )
+            if memory_context is not None and not trusted:
+                logger.warning(
+                    "Gateway routing-context resolver returned invalid context "
+                    "for %s; previous trusted context was cleared",
+                    session_entry.session_key,
+                )
         session_key = session_entry.session_key
         pinned_session_id = str(
             (getattr(event, "metadata", None) or {}).get("gateway_session_id") or ""
