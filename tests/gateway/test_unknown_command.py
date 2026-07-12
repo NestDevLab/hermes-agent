@@ -379,7 +379,7 @@ async def test_plugin_command_binds_current_channel_and_thread_context(monkeypat
     """Scoped plugin commands must see the same ContextVars as agent dispatch."""
     import gateway.run as gateway_run
     from gateway.run import GatewayRunner
-    from gateway.session_context import get_session_env
+    from gateway.session_context import async_delivery_supported, get_session_env
     from hermes_cli import plugins as plugins_mod
 
     source = _make_source()
@@ -391,8 +391,8 @@ async def test_plugin_command_binds_current_channel_and_thread_context(monkeypat
     source.profile = "vitae"
     event = MessageEvent(text="/policy show", source=source, message_id="event-message-1")
     runner = _make_runner()
-    runner._set_session_env = GatewayRunner._set_session_env.__get__(runner)
-    runner._clear_session_env = GatewayRunner._clear_session_env.__get__(runner)
+    runner.adapters[Platform.TELEGRAM].supports_async_delivery = False
+    runner._scoped_session_env = GatewayRunner._scoped_session_env.__get__(runner)
     observed = {}
 
     async def policy_handler(args):
@@ -406,6 +406,7 @@ async def test_plugin_command_binds_current_channel_and_thread_context(monkeypat
             "session_key": get_session_env("HERMES_SESSION_KEY"),
             "message_id": get_session_env("HERMES_SESSION_MESSAGE_ID"),
             "profile": get_session_env("HERMES_SESSION_PROFILE"),
+            "async_delivery": async_delivery_supported(),
         })
         return "scoped policy"
 
@@ -435,6 +436,53 @@ async def test_plugin_command_binds_current_channel_and_thread_context(monkeypat
         "session_key": "agent:main:telegram:group:channel-1:9001",
         "message_id": "source-message-1",
         "profile": "vitae",
+        "async_delivery": False,
     }
     assert get_session_env("HERMES_SESSION_CHAT_ID") == ""
     assert get_session_env("HERMES_SESSION_THREAD_ID") == ""
+
+
+@pytest.mark.asyncio
+async def test_sync_plugin_command_uses_scoped_session_context(monkeypatch):
+    """Synchronous plugin handlers receive the same trusted scoped binding."""
+    import gateway.run as gateway_run
+    from gateway.run import GatewayRunner
+    from gateway.session_context import get_session_env
+    from hermes_cli import plugins as plugins_mod
+
+    runner = _make_runner()
+    runner._scoped_session_env = GatewayRunner._scoped_session_env.__get__(runner)
+    observed = {}
+
+    def sync_handler(args):
+        observed.update(
+            args=args,
+            chat_id=get_session_env("HERMES_SESSION_CHAT_ID"),
+            user_id=get_session_env("HERMES_SESSION_USER_ID"),
+            session_key=get_session_env("HERMES_SESSION_KEY"),
+        )
+        return "sync result"
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_commands",
+        lambda: {"sync-policy": {"description": "Sync policy", "args_hint": "show"}},
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: sync_handler if name == "sync-policy" else None,
+    )
+
+    result = await runner._handle_message(_make_event("/sync-policy show"))
+
+    assert result == "sync result"
+    assert observed == {
+        "args": "show",
+        "chat_id": "c1",
+        "user_id": "u1",
+        "session_key": "agent:main:telegram:dm:c1",
+    }

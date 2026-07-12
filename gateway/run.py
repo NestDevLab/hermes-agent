@@ -10076,13 +10076,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         home_channels={},
                         session_key=_quick_key or "",
                     )
-                    plugin_session_tokens = self._set_session_env(plugin_context)
-                    try:
+                    with self._scoped_session_env(plugin_context):
                         result = plugin_handler(user_args)
                         if asyncio.iscoroutine(result):
                             result = await result
-                    finally:
-                        self._clear_session_env(plugin_session_tokens)
                     return str(result) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
@@ -15049,16 +15046,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return delivered
 
-    def _set_session_env(self, context: SessionContext) -> list:
-        """Set session context variables for the current async task.
-
-        Uses ``contextvars`` instead of ``os.environ`` so that concurrent
-        gateway messages cannot overwrite each other's session state.
-
-        Returns a list of reset tokens; pass them to ``_clear_session_env``
-        in a ``finally`` block.
-        """
-        from gateway.session_context import set_session_vars
+    def _session_env_kwargs(self, context: SessionContext) -> dict:
+        """Build one canonical argument set for top-level and scoped binders."""
         # Propagate the adapter's async-delivery capability so async tools
         # (terminal notify_on_complete / watch_patterns, delegate_task
         # background=True) know whether this channel can wake a later turn.
@@ -15069,18 +15058,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _adapters = getattr(self, "adapters", None) or {}
         _adapter = _adapters.get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
-        return set_session_vars(
-            platform=context.source.platform.value,
-            chat_id=context.source.chat_id,
-            chat_name=context.source.chat_name or "",
-            thread_id=str(context.source.thread_id) if context.source.thread_id else "",
-            user_id=str(context.source.user_id) if context.source.user_id else "",
-            user_name=str(context.source.user_name) if context.source.user_name else "",
-            session_key=context.session_key,
-            message_id=str(context.source.message_id) if context.source.message_id else "",
-            profile=getattr(context.source, "profile", "") or "",
-            async_delivery=_async_delivery,
-        )
+        return {
+            "platform": context.source.platform.value,
+            "chat_id": context.source.chat_id,
+            "chat_name": context.source.chat_name or "",
+            "thread_id": str(context.source.thread_id) if context.source.thread_id else "",
+            "user_id": str(context.source.user_id) if context.source.user_id else "",
+            "user_name": str(context.source.user_name) if context.source.user_name else "",
+            "session_key": context.session_key,
+            "message_id": str(context.source.message_id) if context.source.message_id else "",
+            "profile": getattr(context.source, "profile", "") or "",
+            "async_delivery": _async_delivery,
+        }
+
+    def _set_session_env(self, context: SessionContext) -> list:
+        """Set top-level session ContextVars for the current async task."""
+        from gateway.session_context import set_session_vars
+
+        return set_session_vars(**self._session_env_kwargs(context))
+
+    def _scoped_session_env(self, context: SessionContext):
+        """Return a nestable session scope that restores the outer context."""
+        from gateway.session_context import scoped_session_vars
+
+        return scoped_session_vars(**self._session_env_kwargs(context))
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""

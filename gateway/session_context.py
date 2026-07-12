@@ -36,7 +36,9 @@ needs to replace the import + call site:
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
 """
 
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
@@ -57,6 +59,12 @@ _UNSET: Any = object()
 # os.environ fallback is preserved (no concurrency to leak across). Monotonic
 # latch — once any host binds a session, the process stays engaged for life.
 _session_context_engaged: bool = False
+
+
+@dataclass(frozen=True)
+class _ScopedSessionTokens:
+    session_tokens: tuple[Any, ...]
+    cwd_token: Any = None
 
 
 def session_context_engaged() -> bool:
@@ -154,6 +162,50 @@ def set_current_session_id(session_id: str) -> None:
     _SESSION_ID.set(session_id)
 
 
+def _bind_session_vars(
+    platform: str = "",
+    source: str = "",
+    chat_id: str = "",
+    chat_name: str = "",
+    thread_id: str = "",
+    user_id: str = "",
+    user_name: str = "",
+    session_key: str = "",
+    session_id: str = "",
+    message_id: str = "",
+    profile: str = "",
+    cwd: str = "",
+    async_delivery: bool = True,
+    ui_session_id: str = "",
+) -> _ScopedSessionTokens:
+    """Set all session ContextVars and retain every restoration token."""
+    global _session_context_engaged
+    _session_context_engaged = True
+    tokens = (
+        _SESSION_PLATFORM.set(platform),
+        _SESSION_SOURCE.set(source),
+        _SESSION_CHAT_ID.set(chat_id),
+        _SESSION_CHAT_NAME.set(chat_name),
+        _SESSION_THREAD_ID.set(thread_id),
+        _SESSION_USER_ID.set(user_id),
+        _SESSION_USER_NAME.set(user_name),
+        _SESSION_KEY.set(session_key),
+        _SESSION_ID.set(session_id),
+        _SESSION_UI_SESSION_ID.set(ui_session_id),
+        _SESSION_MESSAGE_ID.set(message_id),
+        _SESSION_PROFILE.set(profile),
+        _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
+    )
+    cwd_token = None
+    try:
+        from agent.runtime_cwd import set_session_cwd
+
+        cwd_token = set_session_cwd(cwd)
+    except Exception:
+        pass
+    return _ScopedSessionTokens(tokens, cwd_token)
+
+
 def set_session_vars(
     platform: str = "",
     source: str = "",
@@ -170,7 +222,7 @@ def set_session_vars(
     async_delivery: bool = True,
     ui_session_id: str = "",
 ) -> list:
-    """Set all session context variables and return reset tokens.
+    """Set all session context variables and return legacy reset tokens.
 
     Call ``clear_session_vars(tokens)`` in a ``finally`` block when the handler
     exits. Note ``clear_session_vars`` resets every var to ``""`` (to suppress
@@ -185,33 +237,43 @@ def set_session_vars(
     ``_SESSION_ASYNC_DELIVERY`` / ``async_delivery_supported``). Stateless
     request/response adapters (the API server) pass ``False``.
     """
-    # Mark the session-context machinery engaged for this process. The
-    # subprocess-env bridge uses this to switch from "os.environ fallback" to
-    # "ContextVar-authoritative, strip on _UNSET" — see session_context_engaged.
-    global _session_context_engaged
-    _session_context_engaged = True
-    tokens = [
-        _SESSION_PLATFORM.set(platform),
-        _SESSION_SOURCE.set(source),
-        _SESSION_CHAT_ID.set(chat_id),
-        _SESSION_CHAT_NAME.set(chat_name),
-        _SESSION_THREAD_ID.set(thread_id),
-        _SESSION_USER_ID.set(user_id),
-        _SESSION_USER_NAME.set(user_name),
-        _SESSION_KEY.set(session_key),
-        _SESSION_ID.set(session_id),
-        _SESSION_UI_SESSION_ID.set(ui_session_id),
-        _SESSION_MESSAGE_ID.set(message_id),
-        _SESSION_PROFILE.set(profile),
-        _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
-    ]
-    try:
-        from agent.runtime_cwd import set_session_cwd
+    binding = _bind_session_vars(
+        platform=platform,
+        source=source,
+        chat_id=chat_id,
+        chat_name=chat_name,
+        thread_id=thread_id,
+        user_id=user_id,
+        user_name=user_name,
+        session_key=session_key,
+        session_id=session_id,
+        message_id=message_id,
+        profile=profile,
+        cwd=cwd,
+        async_delivery=async_delivery,
+        ui_session_id=ui_session_id,
+    )
+    return list(binding.session_tokens)
 
-        set_session_cwd(cwd)
-    except Exception:
-        pass
-    return tokens
+
+@contextmanager
+def scoped_session_vars(**kwargs):
+    """Temporarily bind a complete session context, restoring it exactly.
+
+    Unlike :func:`clear_session_vars`, which intentionally empties a completed
+    top-level lifecycle, this scope is nestable. It resets runtime CWD first and
+    every ContextVar token in reverse set order, including async-delivery.
+    """
+    binding = _bind_session_vars(**kwargs)
+    try:
+        yield
+    finally:
+        try:
+            if binding.cwd_token is not None:
+                binding.cwd_token.var.reset(binding.cwd_token)
+        finally:
+            for token in reversed(binding.session_tokens):
+                token.var.reset(token)
 
 
 def clear_session_vars(tokens: list) -> None:

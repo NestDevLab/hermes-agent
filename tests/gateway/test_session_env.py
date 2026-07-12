@@ -7,11 +7,12 @@ from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import (
-    get_session_env,
-    set_session_vars,
+    async_delivery_supported,
     clear_session_vars,
-    _VAR_MAP,
-    _UNSET,
+    get_session_env,
+    reset_session_vars,
+    scoped_session_vars,
+    set_session_vars,
 )
 
 
@@ -24,10 +25,143 @@ def _reset_contextvars():
     context, so a clear_session_vars() from test A (which sets vars to "")
     would leak into test B.  This fixture ensures each test starts clean.
     """
+    reset_session_vars()
     yield
-    for var in _VAR_MAP.values():
-        # Can't use var.reset() without a token; just set back to sentinel.
-        var.set(_UNSET)
+    reset_session_vars()
+
+
+def _session_snapshot():
+    names = (
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_SOURCE",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_SESSION_CHAT_NAME",
+        "HERMES_SESSION_THREAD_ID",
+        "HERMES_SESSION_USER_ID",
+        "HERMES_SESSION_USER_NAME",
+        "HERMES_SESSION_KEY",
+        "HERMES_SESSION_ID",
+        "HERMES_UI_SESSION_ID",
+        "HERMES_SESSION_MESSAGE_ID",
+        "HERMES_SESSION_PROFILE",
+    )
+    return {name: get_session_env(name) for name in names}
+
+
+def test_scoped_session_vars_restores_nested_context_and_cwd(tmp_path):
+    """A nested scope restores every field, async capability, and runtime CWD."""
+    from agent.runtime_cwd import resolve_agent_cwd
+
+    outer_cwd = tmp_path / "outer"
+    inner_cwd = tmp_path / "inner"
+    outer_cwd.mkdir()
+    inner_cwd.mkdir()
+    outer = {
+        "platform": "outer-platform",
+        "source": "outer-source",
+        "chat_id": "outer-chat",
+        "chat_name": "outer-name",
+        "thread_id": "outer-thread",
+        "user_id": "outer-user",
+        "user_name": "outer-user-name",
+        "session_key": "outer-key",
+        "session_id": "outer-session",
+        "ui_session_id": "outer-ui",
+        "message_id": "outer-message",
+        "profile": "outer-profile",
+        "cwd": str(outer_cwd),
+        "async_delivery": False,
+    }
+    inner = {
+        key: f"inner-{key}" for key in outer if key not in {"cwd", "async_delivery"}
+    }
+    inner.update(cwd=str(inner_cwd), async_delivery=True)
+
+    with scoped_session_vars(**outer):
+        outer_snapshot = _session_snapshot()
+        assert async_delivery_supported() is False
+        assert resolve_agent_cwd() == outer_cwd
+
+        with scoped_session_vars(**inner):
+            assert get_session_env("HERMES_SESSION_CHAT_ID") == "inner-chat_id"
+            assert get_session_env("HERMES_UI_SESSION_ID") == "inner-ui_session_id"
+            assert async_delivery_supported() is True
+            assert resolve_agent_cwd() == inner_cwd
+
+        assert _session_snapshot() == outer_snapshot
+        assert async_delivery_supported() is False
+        assert resolve_agent_cwd() == outer_cwd
+
+
+def test_scoped_session_vars_restores_after_exception(tmp_path):
+    """Handler failures cannot destroy the enclosing session or runtime CWD."""
+    from agent.runtime_cwd import resolve_agent_cwd
+
+    outer_cwd = tmp_path / "outer"
+    inner_cwd = tmp_path / "inner"
+    outer_cwd.mkdir()
+    inner_cwd.mkdir()
+
+    with scoped_session_vars(
+        platform="outer",
+        chat_id="outer-chat",
+        cwd=str(outer_cwd),
+        async_delivery=False,
+    ):
+        before = _session_snapshot()
+        with pytest.raises(RuntimeError, match="plugin failed"):
+            with scoped_session_vars(
+                platform="inner",
+                chat_id="inner-chat",
+                cwd=str(inner_cwd),
+                async_delivery=True,
+            ):
+                raise RuntimeError("plugin failed")
+
+        assert _session_snapshot() == before
+        assert async_delivery_supported() is False
+        assert resolve_agent_cwd() == outer_cwd
+
+
+@pytest.mark.asyncio
+async def test_scoped_session_vars_isolates_concurrent_async_handlers():
+    """Overlapping async plugin scopes retain their own complete session state."""
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    started = 0
+    results = {}
+
+    async def handler(label):
+        nonlocal started
+        with scoped_session_vars(
+            platform="telegram",
+            chat_id=f"chat-{label}",
+            thread_id=f"thread-{label}",
+            session_key=f"session-{label}",
+            async_delivery=(label == "a"),
+        ):
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+            await release.wait()
+            results[label] = (
+                get_session_env("HERMES_SESSION_CHAT_ID"),
+                get_session_env("HERMES_SESSION_THREAD_ID"),
+                get_session_env("HERMES_SESSION_KEY"),
+                async_delivery_supported(),
+            )
+
+    task_a = asyncio.create_task(handler("a"))
+    task_b = asyncio.create_task(handler("b"))
+    await both_started.wait()
+    release.set()
+    await asyncio.gather(task_a, task_b)
+
+    assert results == {
+        "a": ("chat-a", "thread-a", "session-a", True),
+        "b": ("chat-b", "thread-b", "session-b", False),
+    }
 
 
 def test_set_session_env_sets_contextvars(monkeypatch):
@@ -393,4 +527,3 @@ async def test_gateway_executor_refuses_resurrection_after_shutdown():
             await runner._run_in_executor_with_context(lambda: "second")
     finally:
         runner._shutdown_executor()
-
