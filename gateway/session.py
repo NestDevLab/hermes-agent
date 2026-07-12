@@ -15,12 +15,231 @@ import os
 import json
 import threading
 import uuid
+import re
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
+
+
+_AGENT_MEMORY_CONTEXT_SCHEMA = "amf-conversation-context/v1"
+_GROUP_OUTPUT_POLICY_SCHEMA = "amf-group-output-policy/v1"
+_OPAQUE_CONTEXT_TAG_RE = re.compile(
+    r"^hmac-sha256:[A-Za-z0-9._-]{1,128}:[a-f0-9]{64}$"
+)
+_CANONICAL_SCOPE_TYPES = frozenset(
+    {"agent", "person", "relationship", "room", "domain", "shared"}
+)
+_AGENT_MEMORY_CONTEXT_KEYS = frozenset(
+    {
+        "schema",
+        "conversation_kind",
+        "actor_id",
+        "participant_identity_ids",
+        "person_bindings",
+        "allowed_scopes",
+        "scope_ids",
+        "room_scope_id",
+        "context_tags",
+        "context_tag_bindings",
+        "output_policy",
+    }
+)
+
+
+def _canonical_string_list(value: Any) -> Optional[List[str]]:
+    if not isinstance(value, list):
+        return None
+    items = [str(item).strip() for item in value]
+    if any(not item for item in items):
+        return None
+    if items != sorted(items) or len(items) != len(set(items)):
+        return None
+    return items
+
+
+def _canonical_context_tag_list(value: Any) -> Optional[List[str]]:
+    items = _canonical_string_list(value)
+    if not items or any(not _OPAQUE_CONTEXT_TAG_RE.fullmatch(item) for item in items):
+        return None
+    return items
+
+
+def _expected_conversation_kind(source: "SessionSource") -> str:
+    return "dm" if str(source.chat_type or "").lower() in {"dm", "private"} else "group"
+
+
+def normalize_agent_memory_context(
+    value: Any,
+    source: "SessionSource",
+) -> Optional[Dict[str, Any]]:
+    """Validate and canonicalize resolver-produced memory routing context.
+
+    The gateway never derives identities, participants, relationship scopes, or
+    disclosure policy from display metadata.  A resolver must provide the full
+    record and bind the current authenticated sender explicitly.  Returning
+    ``None`` is fail-closed: callers clear any previously persisted context.
+    """
+    if not isinstance(value, dict) or set(value) != _AGENT_MEMORY_CONTEXT_KEYS:
+        return None
+    if value.get("schema") != _AGENT_MEMORY_CONTEXT_SCHEMA:
+        return None
+
+    conversation_kind = str(value.get("conversation_kind") or "").strip().lower()
+    if conversation_kind != _expected_conversation_kind(source):
+        return None
+
+    actor_id = str(value.get("actor_id") or "").strip()
+    if not actor_id.startswith("agent:") or len(actor_id) > 256:
+        return None
+
+    participants = _canonical_string_list(value.get("participant_identity_ids"))
+    if not participants or any(not item.startswith("person:") for item in participants):
+        return None
+
+    person_bindings = value.get("person_bindings")
+    if not isinstance(person_bindings, dict) or not person_bindings:
+        return None
+    normalized_person_bindings: Dict[str, str] = {}
+    for external_id, identity_id in person_bindings.items():
+        key = str(external_id).strip()
+        identity = str(identity_id).strip()
+        if not key or not identity.startswith("person:") or identity not in participants:
+            return None
+        normalized_person_bindings[key] = identity
+    if list(normalized_person_bindings) != sorted(normalized_person_bindings):
+        return None
+    sender_ids = {
+        str(item).strip()
+        for item in (source.user_id, source.user_id_alt)
+        if str(item or "").strip()
+    }
+    if not sender_ids or not any(sender_id in normalized_person_bindings for sender_id in sender_ids):
+        return None
+
+    raw_scopes = value.get("allowed_scopes")
+    if not isinstance(raw_scopes, list) or not raw_scopes:
+        return None
+    scopes: List[Dict[str, str]] = []
+    for raw_scope in raw_scopes:
+        if not isinstance(raw_scope, dict) or set(raw_scope) != {"type", "id"}:
+            return None
+        scope_type = str(raw_scope.get("type") or "").strip().lower()
+        scope_id = str(raw_scope.get("id") or "").strip()
+        if scope_type not in _CANONICAL_SCOPE_TYPES or not scope_id.startswith(f"{scope_type}:"):
+            return None
+        scopes.append({"type": scope_type, "id": scope_id})
+    if scopes != sorted(scopes, key=lambda item: (item["type"], item["id"])):
+        return None
+    scope_ids = [scope["id"] for scope in scopes]
+    if len(scope_ids) != len(set(scope_ids)) or value.get("scope_ids") != sorted(scope_ids):
+        return None
+
+    room_scope_id = str(value.get("room_scope_id") or "").strip()
+    if not any(
+        scope["type"] == "room" and scope["id"] == room_scope_id for scope in scopes
+    ):
+        return None
+    for participant in participants:
+        if not any(scope["type"] == "person" and scope["id"] == participant for scope in scopes):
+            return None
+    relationship_scope_ids = sorted(
+        scope["id"] for scope in scopes if scope["type"] == "relationship"
+    )
+    if not relationship_scope_ids:
+        return None
+
+    context_tags = value.get("context_tags")
+    bindings = value.get("context_tag_bindings")
+    expected_binding_keys = {"room", "person", "relationship"}
+    if (
+        not isinstance(context_tags, dict)
+        or set(context_tags) != expected_binding_keys
+        or not isinstance(bindings, dict)
+        or set(bindings) != expected_binding_keys
+    ):
+        return None
+
+    expected_scoped_bindings = {
+        "room": [room_scope_id],
+        "person": participants,
+        "relationship": relationship_scope_ids,
+    }
+    normalized_tags: Dict[str, List[str]] = {}
+    normalized_bindings: Dict[str, Dict[str, List[str]]] = {}
+    for namespace in ("room", "person", "relationship"):
+        declared = _canonical_context_tag_list(context_tags.get(namespace))
+        raw_binding = bindings.get(namespace)
+        expected_ids = expected_scoped_bindings[namespace]
+        if declared is None or not isinstance(raw_binding, dict):
+            return None
+        if sorted(str(key) for key in raw_binding) != expected_ids:
+            return None
+        resolved: Dict[str, List[str]] = {}
+        union: List[str] = []
+        for scope_id in expected_ids:
+            bound = _canonical_context_tag_list(raw_binding.get(scope_id))
+            if bound is None:
+                return None
+            resolved[scope_id] = bound
+            union.extend(bound)
+        if sorted(union) != declared or len(union) != len(set(union)):
+            return None
+        normalized_tags[namespace] = declared
+        normalized_bindings[namespace] = resolved
+
+    output_policy = value.get("output_policy")
+    normalized_policy = None
+    if conversation_kind == "group":
+        policy_keys = {
+            "schema",
+            "policy_id",
+            "allowed_claim_ids",
+            "protected_claim_ids",
+            "protected_subject_ids",
+        }
+        if not isinstance(output_policy, dict) or set(output_policy) != policy_keys:
+            return None
+        if output_policy.get("schema") != _GROUP_OUTPUT_POLICY_SCHEMA:
+            return None
+        policy_id = str(output_policy.get("policy_id") or "").strip()
+        allowed_claim_ids = _canonical_string_list(output_policy.get("allowed_claim_ids"))
+        protected_claim_ids = _canonical_string_list(output_policy.get("protected_claim_ids"))
+        protected_subject_ids = _canonical_string_list(output_policy.get("protected_subject_ids"))
+        if (
+            not policy_id
+            or allowed_claim_ids is None
+            or protected_claim_ids is None
+            or protected_subject_ids is None
+            or not (protected_claim_ids or protected_subject_ids)
+            or any(not item.startswith(("person:", "agent:")) for item in protected_subject_ids)
+        ):
+            return None
+        normalized_policy = {
+            "schema": _GROUP_OUTPUT_POLICY_SCHEMA,
+            "policy_id": policy_id,
+            "allowed_claim_ids": allowed_claim_ids,
+            "protected_claim_ids": protected_claim_ids,
+            "protected_subject_ids": protected_subject_ids,
+        }
+    elif output_policy is not None:
+        return None
+
+    return {
+        "schema": _AGENT_MEMORY_CONTEXT_SCHEMA,
+        "conversation_kind": conversation_kind,
+        "actor_id": actor_id,
+        "participant_identity_ids": participants,
+        "person_bindings": normalized_person_bindings,
+        "allowed_scopes": scopes,
+        "scope_ids": sorted(scope_ids),
+        "room_scope_id": room_scope_id,
+        "context_tags": normalized_tags,
+        "context_tag_bindings": normalized_bindings,
+        "output_policy": normalized_policy,
+    }
 
 
 def _now() -> datetime:
@@ -658,6 +877,11 @@ class SessionEntry:
     display_name: Optional[str] = None
     platform: Optional[Platform] = None
     chat_type: str = "dm"
+
+    # Resolver-produced, route-bound Agent Memory Fabric context.  This is
+    # never inferred from chat labels or sender display names; SessionStore's
+    # bind_agent_memory_context() is the only supported writer.
+    agent_memory_context: Optional[Dict[str, Any]] = None
     
     # Token tracking
     input_tokens: int = 0
@@ -755,6 +979,13 @@ class SessionEntry:
             result["model_override"] = sanitize_model_override(self.model_override)
         if self.origin:
             result["origin"] = self.origin.to_dict()
+        if self.agent_memory_context and self.origin:
+            context = normalize_agent_memory_context(
+                self.agent_memory_context,
+                self.origin,
+            )
+            if context is not None:
+                result["agent_memory_context"] = context
         return result
     
     @classmethod
@@ -797,7 +1028,7 @@ class SessionEntry:
                 "Invalid session_key: potential directory traversal detected"
             )
 
-        return cls(
+        entry = cls(
             session_key=session_key,
             session_id=session_id,
             created_at=datetime.fromisoformat(data["created_at"]),
@@ -825,6 +1056,11 @@ class SessionEntry:
             reset_had_activity=data.get("reset_had_activity", False),
             model_override=sanitize_model_override(data.get("model_override")),
         )
+        entry.agent_memory_context = normalize_agent_memory_context(
+            data.get("agent_memory_context"),
+            origin,
+        ) if origin is not None else None
+        return entry
 
 
 def is_shared_multi_user_session(
@@ -2061,6 +2297,37 @@ class SessionStore:
                 return
             entry.model_override = cleaned
             self._save()
+
+    def bind_agent_memory_context(
+        self,
+        session_key: str,
+        source: SessionSource,
+        context: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Persist resolver-produced memory context for the exact route.
+
+        Missing, malformed, ambiguous, or route-mismatched context clears any
+        previous value.  The conversation remains available, but downstream
+        memory consumers must treat the session as untrusted until a resolver
+        supplies a complete record again.
+        """
+        normalized = None
+        try:
+            if session_key == self._generate_session_key(source):
+                normalized = normalize_agent_memory_context(context, source)
+        except Exception:
+            normalized = None
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return False
+            if entry.agent_memory_context == normalized:
+                return normalized is not None
+            entry.agent_memory_context = normalized
+            self._save()
+        return normalized is not None
 
     def get_model_override(self, session_key: str) -> Optional[Dict[str, str]]:
         """Return the persisted /model override for *session_key*, if any."""
